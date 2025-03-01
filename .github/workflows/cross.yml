@@ -1,0 +1,164 @@
+# from: https://github.com/liudf0716/xfrpc/issues/69#issuecomment-2639486304
+name: 编译xfrpc
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: '编译xfrpc源码的分支或版本号，默认主分支master'
+        required: true
+        default: 'master'
+      del:
+        description: '是否删除历史编译的流程记录'
+        required: true
+        default: true
+        type: boolean
+      rel:
+        description: '编译完成后是否发布Release'
+        required: true
+        default: true
+        type: boolean
+      tag:
+        description: '指定Release的版本号（留空为源码提交哈希值）'
+        required: false
+        default: ''
+  
+env:
+  branch: "${{ github.event.inputs.branch }}"
+  tag: "${{ github.event.inputs.tag }}"
+  rel: "${{ github.event.inputs.rel }}"
+  TZ: Asia/Shanghai
+permissions:
+  contents: write
+  actions: write
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - target: aarch64-linux-musl
+          os: ubuntu-latest
+          URL: aarch64-linux-musl
+          ARCH_FLAG: linux-aarch64
+          
+        - target: x86_64-linux-musl
+          os: ubuntu-latest
+          URL: x86_64-linux-musl
+          ARCH_FLAG: linux-x86_64
+            
+        - target: i686-linux-musl
+          os: ubuntu-latest
+          URL: i686-linux-musl
+          ARCH_FLAG: linux-generic32
+        
+        - target: armv7-linux-musleabihf
+          os: ubuntu-latest
+          URL: armv7l-linux-musleabihf
+          ARCH_FLAG: linux-armv4
+
+        - target: armv7-linux-musleabi
+          os: ubuntu-latest
+          URL: armv7m-linux-musleabi
+          ARCH_FLAG: linux-armv4
+          
+        - target: arm-linux-musleabihf
+          os: ubuntu-latest
+          URL: arm-linux-musleabihf
+          ARCH_FLAG: linux-armv4
+
+        - target: arm-linux-musleabi
+          os: ubuntu-latest
+          URL: arm-linux-musleabi
+          ARCH_FLAG: linux-armv4
+
+        - target: mipsel-linux-musl
+          os: ubuntu-latest
+          URL: mipsel-linux-muslsf
+          ARCH_FLAG: linux-mips32
+
+        - target: mips-linux-musl
+          os: ubuntu-latest
+          URL: mips-linux-muslsf
+          ARCH_FLAG: linux-mips32
+
+    runs-on: ${{ matrix.os }}
+    steps:
+     - name: Checkout code
+       uses: actions/checkout@v4
+       with:
+        repository: liudf0716/xfrpc
+        ref: ${{ env.branch }}
+     - name: 下载linux-musl-gcc
+       uses: lmq8267/dl-musl@main
+       with:
+        target: ${{ matrix.URL }}
+        static: true
+        gccpath: /tmp
+     - name: 编译
+       run: |
+         rm -rf thirdparty/openssl-1.1.1m
+         git clone --recurse-submodules https://github.com/openssl/openssl.git -b openssl-3.4.0 thirdparty/openssl-1.1.1m
+         sed -i 's|"linux-mips32"|${CMAKE_ARCH_FLAG}|g' thirdparty/CMakeLists.txt
+         sed -i 's|mips|YES|g' thirdparty/CMakeLists.txt
+         sed -i 's|--static|no-shared|g' thirdparty/CMakeLists.txt
+         sed -i 's|DOPENSSL_LIBRARES|DOPENSSL_LIBRARIES|g' thirdparty/CMakeLists.txt
+         sed -i 's|dl pthread|dl pthread json-c atomic ${PROJECT_SOURCE_DIR}/thirdparty/libs/libz.a ${PROJECT_SOURCE_DIR}/thirdparty/libs/libcrypto.a|g' CMakeLists.txt
+         sed -i '/${PROJECT_SOURCE_DIR}\/thirdparty\/include\/libevent/i ${PROJECT_SOURCE_DIR}/thirdparty/zlib-1.2.13/' CMakeLists.txt
+         mkdir -p bin && cd bin
+         cmake -DTHIRDPARTY_STATIC_BUILD=YES -DCMAKE_ARCH_FLAG="${{ matrix.ARCH_FLAG }}" -DCROSS_C_COMPILER=$CC ..
+         make
+         $STRIP xfrpc
+         file xfrpc
+     - name: 安装 UPX
+       uses: crazy-max/ghaction-upx@v3
+       with:
+        version: latest
+        install-only: true
+     - name: 压缩
+       run: |
+        cd bin
+        cp xfrpc xfrpc-${{ matrix.target }}_upx
+        mv xfrpc xfrpc-${{ matrix.target }}
+        upx --lzma --best xfrpc-${{ matrix.target }}_upx 
+        
+     - uses: actions/upload-artifact@v4
+       with:
+        name: xfrpc-${{ env.branch }}-${{ matrix.target }}
+        path: bin/*
+     - name: 打包
+       if: github.event.inputs.rel == 'true'
+       shell: bash
+       run: |
+          echo "build_time=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
+          if [ -z "$TAG" ]; then
+              echo "tag=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          fi
+          echo "haxi=$(git rev-parse HEAD)" >> $GITHUB_ENV
+       env:
+        TAG: ${{ env.tag }}
+        TARGET: ${{ matrix.target }}
+     - name: 发布Release
+       if: github.event.inputs.rel == 'true'
+       uses: softprops/action-gh-release@v2
+       with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+           > ### 编译时间 ：${{ env.build_time }} [提交记录](https://github.com/liudf0716/xfrpc/tree/${{ env.haxi }})
+           
+           [官方源码](https://github.com/liudf0716/xfrpc)
+           
+          tag_name: ${{env.tag}}
+          files: |
+            bin/xfrpc-${{ matrix.target }}
+            bin/xfrpc-${{ matrix.target }}_upx
+  del:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 删除流程记录
+        if: github.event.inputs.del == 'true'
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          retain_days: 0
+          keep_minimum_runs: 0
